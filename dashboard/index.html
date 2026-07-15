@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Disaster Detection Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  :root {
+    --bg: #0b1220;
+    --panel: #121a2b;
+    --border: #223049;
+    --text: #e8edf7;
+    --muted: #8a97ad;
+    --fire: #ff5a4e;
+    --flood: #3ba7ff;
+    --smoke: #9aa3b0;
+    --person: #35d07f;
+    --high: #ff5a4e;
+    --medium: #ffb84d;
+    --low: #8a97ad;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--person); display: inline-block; margin-right: 6px;
+  }
+  .layout {
+    display: grid;
+    grid-template-columns: 1.3fr 1fr;
+    gap: 16px;
+    padding: 16px 24px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 10px; }
+  #map { height: 380px; border-radius: 8px; }
+  .stats-row { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin-bottom: 16px; }
+  .stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+  .stat-card .num { font-size: 24px; font-weight: 700; }
+  .stat-card .label { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+  .badge { padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+  .badge.high { background: rgba(255,90,78,.15); color: var(--high); }
+  .badge.medium { background: rgba(255,184,77,.15); color: var(--medium); }
+  .badge.low { background: rgba(138,151,173,.15); color: var(--low); }
+  .type-dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:6px; }
+  .type-fire { background: var(--fire); }
+  .type-flood { background: var(--flood); }
+  .type-smoke { background: var(--smoke); }
+  .type-stranded_person { background: var(--person); }
+  .feed { max-height: 380px; overflow-y: auto; }
+  .empty { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
+  select, button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; font-size: 12px;
+  }
+  .controls { display:flex; gap: 8px; margin-bottom: 10px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Drone-Based Disaster Detection &amp; Damage Assessment</h1>
+    <div class="sub"><span class="status-dot"></span>Live monitoring dashboard</div>
+  </div>
+  <div class="sub" id="lastUpdated">--</div>
+</header>
+
+<div style="padding: 16px 24px 0;">
+  <div class="stats-row" id="statsRow"></div>
+</div>
+
+<div class="layout">
+  <div class="panel">
+    <h2>Detection Map (patrol area)</h2>
+    <div id="map"></div>
+  </div>
+
+  <div class="panel">
+    <h2>High-Severity Alerts (dispatched to NDRF / SDRF)</h2>
+    <div class="feed" id="alertsFeed"><div class="empty">No alerts yet</div></div>
+  </div>
+</div>
+
+<div style="padding: 0 24px 24px;">
+  <div class="panel">
+    <div class="controls">
+      <h2 style="margin:0;flex:1;">Detection Log</h2>
+      <select id="typeFilter">
+        <option value="">All types</option>
+        <option value="fire">Fire</option>
+        <option value="smoke">Smoke</option>
+        <option value="flood">Flood</option>
+        <option value="stranded_person">Stranded Person</option>
+      </select>
+      <button onclick="loadAll()">Refresh</button>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Type</th><th>Confidence</th><th>Severity</th><th>Location</th><th>Drone</th><th>Time</th></tr>
+      </thead>
+      <tbody id="logBody"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+let map, markersLayer;
+
+function initMap() {
+  map = L.map('map').setView([28.4744, 77.5040], 15);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors', maxZoom: 19
+  }).addTo(map);
+  markersLayer = L.layerGroup().addTo(map);
+}
+
+const typeColor = { fire: '#ff5a4e', flood: '#3ba7ff', smoke: '#9aa3b0', stranded_person: '#35d07f' };
+
+function fmtTime(ts) {
+  return new Date(ts * 1000).toLocaleTimeString();
+}
+
+async function loadStats() {
+  const res = await fetch(`${API}/api/stats`);
+  const data = await res.json();
+  const row = document.getElementById('statsRow');
+  const cards = [
+    { label: 'Total Detections', num: data.total_detections || 0 },
+    { label: 'High Severity', num: (data.by_severity && data.by_severity.high) || 0 },
+    { label: 'Fire Events', num: (data.by_type && data.by_type.fire) || 0 },
+    { label: 'Flood Events', num: (data.by_type && data.by_type.flood) || 0 },
+  ];
+  row.innerHTML = cards.map(c => `
+    <div class="stat-card"><div class="num">${c.num}</div><div class="label">${c.label}</div></div>
+  `).join('');
+}
+
+async function loadAlerts() {
+  const res = await fetch(`${API}/api/alerts`);
+  const data = await res.json();
+  const feed = document.getElementById('alertsFeed');
+  if (!data.length) { feed.innerHTML = '<div class="empty">No alerts yet</div>'; return; }
+  feed.innerHTML = data.map(a => `
+    <div style="padding:10px 0;border-bottom:1px solid var(--border);">
+      <div><span class="type-dot type-${a.disaster_type}"></span><strong>${a.disaster_type.replace('_',' ')}</strong>
+        <span class="badge high" style="float:right;">${(a.confidence*100).toFixed(0)}%</span></div>
+      <div style="color:var(--muted);font-size:12px;margin-top:4px;">
+        ${a.latitude.toFixed(4)}, ${a.longitude.toFixed(4)} • ${fmtTime(a.timestamp)}<br/>
+        Dispatched to: ${a.dispatched_to || '—'}
+      </div>
+    </div>
+  `).join('');
+}
+
+async function loadAll(typeOverride) {
+  const type = typeOverride !== undefined ? typeOverride : document.getElementById('typeFilter').value;
+  const url = type ? `${API}/api/detections?type=${type}` : `${API}/api/detections`;
+  const res = await fetch(url);
+  const data = await res.json();
+
+  // Table
+  const body = document.getElementById('logBody');
+  body.innerHTML = data.length ? data.map(d => `
+    <tr>
+      <td><span class="type-dot type-${d.disaster_type}"></span>${d.disaster_type.replace('_',' ')}</td>
+      <td>${(d.confidence*100).toFixed(0)}%</td>
+      <td><span class="badge ${d.severity}">${d.severity}</span></td>
+      <td>${d.latitude.toFixed(4)}, ${d.longitude.toFixed(4)}</td>
+      <td>${d.drone_id}</td>
+      <td>${fmtTime(d.timestamp)}</td>
+    </tr>
+  `).join('') : '<tr><td colspan="6" class="empty">No detections logged yet</td></tr>';
+
+  // Map markers
+  markersLayer.clearLayers();
+  data.forEach(d => {
+    const marker = L.circleMarker([d.latitude, d.longitude], {
+      radius: 7, color: typeColor[d.disaster_type] || '#fff', fillOpacity: .8
+    });
+    marker.bindPopup(`<strong>${d.disaster_type}</strong><br/>Confidence: ${(d.confidence*100).toFixed(0)}%<br/>Severity: ${d.severity}`);
+    marker.addTo(markersLayer);
+  });
+
+  document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+document.getElementById('typeFilter').addEventListener('change', () => loadAll());
+
+initMap();
+loadStats();
+loadAll();
+loadAlerts();
+setInterval(() => { loadStats(); loadAll(); loadAlerts(); }, 4000);
+</script>
+</body>
+</html>
